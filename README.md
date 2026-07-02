@@ -1,4 +1,4 @@
-# 🤖 Autonomous ML Forex Trading Engine
+# 🤖 Autonomous ML Engine
 An automated quantitative machine learning pipeline running serverless infrastructure. Powered by regularized gradient boosting architectures.
 
 ---
