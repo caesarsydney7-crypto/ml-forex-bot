@@ -4,141 +4,93 @@ import pandas as pd
 import numpy as np
 from xgboost import XGBClassifier
 from sklearn.preprocessing import StandardScaler
-import requests
+import matplotlib.pyplot as plt
+import seaborn as sns
 
-class InstitutionalForexEngine:
-    def __init__(self, symbol: str, interval: str = "15m", period: str = "60d"):
+class VisualQuantEngine:
+    def __init__(self, symbol: str):
         self.symbol = symbol
-        self.interval = interval
-        self.period = period
         self.scaler = StandardScaler()
 
-    def ingest_and_clean_data(self) -> pd.DataFrame:
-        """Downloads high-frequency bars and handles structural multi-indexing anomalies."""
-        print(f"Executing cloud ingestion layer for {self.symbol}...")
-        df = yf.download(self.symbol, period=self.period, interval=self.interval)
-        if df.empty:
-            raise ValueError("Zero records returned from data provider.")
-        
-        # Flatten MultiIndex column definitions if present
+    def run_pipeline(self):
+        # 1. Ingest & Process Data
+        print("Ingesting market matrix...")
+        df = yf.download(self.symbol, period="30d", interval="15m")
         df.columns = [col[0] if isinstance(col, tuple) else col for col in df.columns]
-        return df
-
-    def engineer_fractional_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Transforms raw non-stationary price series into stationary alpha features."""
-        # Calculate dynamic structural volatility
+        
+        # 2. Advanced Math Calculations
         df['Log_Return'] = np.log(df['Close'] / df['Close'].shift(1))
         df['ATR'] = df['High'].rolling(14).max() - df['Low'].rolling(14).min()
-        df['Rolling_Volatility'] = df['Log_Return'].rolling(window=20).std()
-
-        # Advanced Technical Structural Features
-        df['RSI'] = self._calculate_rsi(df['Close'], window=14)
-        df['Z_Score'] = (df['Close'] - df['Close'].rolling(20).mean()) / df['Close'].rolling(20).std()
-        
-        # Microstructure Feature: Volume Weighting
-        df['Volume_Norm'] = (df['Volume'] - df['Volume'].rolling(20).mean()) / (df['Volume'].rolling(20).std() + 1e-8)
-        
-        # Mathematical stationarity transform via fractional differences approximation
-        # (Preserves intermediate historical pattern structures while neutralizing raw linear drift)
-        df['FracDiff_Close'] = df['Close'] - 0.4 * df['Close'].shift(1) - 0.15 * df['Close'].shift(2)
-        
-        return df
-
-    def apply_triple_barrier_labeling(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Applies dynamic target bounds adjusted to structural market volatility."""
-        # Target: 1 if market hits an upward barrier before hitting a lower barrier, calibrated by ATR
-        barrier_distance = df['ATR'] * 1.5
-        future_close = df['Close'].shift(-4) # Look 4 bars (1 hour) ahead
-        
-        df['Target'] = np.where(future_close > (df['Close'] + barrier_distance), 1, 
-                       np.where(future_close < (df['Close'] - barrier_distance), 0, np.nan))
-        
-        # Forward fill neutral structures or drop edge rows
+        df['RSI'] = self._calculate_rsi(df['Close'], 14)
+        df['Target'] = np.where(df['Close'].shift(-4) > (df['Close'] + df['ATR'] * 1.2), 1, 
+                       np.where(df['Close'].shift(-4) < (df['Close'] - df['ATR'] * 1.2), 0, np.nan))
         df.dropna(subset=['Target'], inplace=True)
-        return df
 
-    def _calculate_rsi(self, series: pd.Series, window: int) -> pd.Series:
-        delta = series.diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=window).mean()
-        rs = gain / (loss + 1e-8)
-        return 100 - (100 / (1 + rs))
+        feature_cols = ['Log_Return', 'ATR', 'RSI']
+        X = df[feature_cols]
+        y = df['Target'].astype(int)
 
-    def run_walk_forward_execution(self):
-        """Executes full Walk-Forward back-validation and computes real-time live execution weights."""
-        raw_df = self.ingest_and_clean_data()
-        feature_df = self.engineer_fractional_features(raw_df)
-        ml_dataset = self.apply_triple_barrier_labeling(feature_df)
-
-        feature_cols = ['Log_Return', 'Rolling_Volatility', 'RSI', 'Z_Score', 'Volume_Norm', 'FracDiff_Close']
+        # 3. Machine Learning Training Engine
+        split = int(len(X) * 0.85)
+        X_train, y_train = X.iloc[:split], y.iloc[:split]
+        X_val, y_val = X.iloc[split:], y.iloc[split:]
         
-        X = ml_dataset[feature_cols]
-        y = ml_dataset['Target'].astype(int)
-
-        # Walk-Forward Validation: Train on past 85%, validate on most recent 15%
-        split_idx = int(len(X) * 0.85)
-        X_train, y_train = X.iloc[:split_idx], y.iloc[:split_idx]
-        X_val, y_val = X.iloc[split_idx:], y.iloc[split_idx:]
-
-        # Scale Feature Arrays to eliminate feature dominance
         X_train_scaled = self.scaler.fit_transform(X_train)
         X_val_scaled = self.scaler.transform(X_val)
 
-        # Highly Regularized XGBoost Architecture to violently prevent overfitting
-        model = XGBClassifier(
-            n_estimators=120,
-            max_depth=4,
-            learning_rate=0.03,
-            subsample=0.7,
-            colsample_bytree=0.7,
-            reg_alpha=0.1,      # L1 Regularization
-            reg_lambda=1.5,     # L2 Regularization
-            random_state=42,
-            eval_metric='logloss'
-        )
-        
+        model = XGBClassifier(n_estimators=50, max_depth=3, random_state=42)
         model.fit(X_train_scaled, y_train)
 
-        # Real-time state classification inference
-        latest_live_bar = X.tail(1)
-        latest_live_bar_scaled = self.scaler.transform(latest_live_bar)
+        # Predict most recent state
+        latest_scaled = self.scaler.transform(X.tail(1))
+        prediction = model.predict(latest_scaled)[0]
+        confidence = model.predict_proba(latest_scaled)[0][prediction]
+
+        # 4. GRAPHICS ENGINE GENERATION LAYER
+        self.generate_dashboard(df.tail(100), prediction, confidence)
+
+    def generate_dashboard(self, plot_df, pred, conf):
+        print("Generating professional dashboard graphic...")
+        sns.set_theme(style="darkgrid")
         
-        prediction = model.predict(latest_live_bar_scaled)[0]
-        probabilities = model.predict_proba(latest_live_bar_scaled)[0]
-        confidence = probabilities[prediction]
+        # Create a beautiful 2-panel visual canvas
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), sharex=False)
+        fig.suptitle(f"AI QUANT METRICS INTERFACE: {self.symbol}", fontsize=16, fontweight='bold', color='#111111')
 
-        print(f"--- Production Model Diagnostics ---")
-        print(f"Latest Market Wave State Probability: Vector Matrix {probabilities}")
-        print(f"Calculated Classification Edge: Direction {prediction} | Security Score: {confidence*100:.2f}%")
+        # Panel 1: Price Action Matrix with Volatility Barriers
+        ax1.plot(plot_df.index, plot_df['Close'], color='#2471A3', label='Market Price (EURUSD)', linewidth=2)
+        ax1.fill_between(plot_df.index, plot_df['Close'] + plot_df['ATR'], plot_df['Close'] - plot_df['ATR'], 
+                         color='#2471A3', alpha=0.15, label='Volatility Envelope (ATR)')
+        ax1.set_title("Market Structural Framework & Price Action", fontsize=12, fontweight='bold')
+        ax1.legend(loc='upper left')
 
-        # Pro-Level Execution Guard Rail
-        # Institutional signals require deep mathematical edge (>70% pure pattern consensus)
-        if confidence > 0.70:
-            signal = "BUY" if prediction == 1 else "SELL"
-            self.route_execution_order(signal, confidence)
-        else:
-            print("Mathematical consensus insufficient. System status: HELD.")
+        # Panel 2: Relative Strength Technical Engine
+        ax2.plot(plot_df.index, plot_df['RSI'], color='#E67E22', label='RSI Data Array', linewidth=1.5)
+        ax2.axhline(70, color='#C0392B', linestyle='--', alpha=0.6)
+        ax2.axhline(30, color='#27AE60', linestyle='--', alpha=0.6)
+        ax2.set_title("Neural Feature Inputs (Relative Strength Index)", fontsize=12, fontweight='bold')
+        ax2.set_ylim(10, 90)
 
-    def route_execution_order(self, direction: str, edge_score: float):
-        print(f"🌟 CRITICAL SIGNAL ENFORCED: Deploying {direction} order matrix across system rails.")
-        api_url = os.environ.get("BROKER_WEBHOOK_URL")
-        if not api_url:
-            print("System Warning: Live Webhook routing target omitted. Run finalized inside Sandbox Logs.")
-            return
+        # Inject Visual Metric Status Overlay HUD Boxes
+        status_text = f"PREDICTION MODEL DIRECTION: {'UP TREND (BUY)' if pred == 1 else 'DOWN TREND (SELL)'}\nPATTERN CONSENSUS CONFIDENCE: {conf*100:.2f}%"
+        box_color = '#27AE60' if pred == 1 else '#C0392B'
+        
+        fig.text(0.13, 0.02, status_text, fontsize=11, fontweight='bold', color='white',
+                 bbox=dict(facecolor=box_color, alpha=0.85, boxstyle='round,pad=0.5'))
 
-        payload = {
-            "signal": direction,
-            "asset": self.symbol,
-            "execution_weight": float(edge_score),
-            "timestamp": pd.Timestamp.now().isoformat()
-        }
-        try:
-            res = requests.post(api_url, json=payload, timeout=10)
-            print(f"Broker Router Connection established. Handshake Code: {res.status_code}")
-        except Exception as err:
-            print(f"Broker routing array link exception: {err}")
+        plt.tight_layout(rect=[0, 0.06, 1, 0.96])
+        
+        # Save output graphic layout binary
+        plt.savefig("trading_dashboard.png", dpi=150)
+        plt.close()
+        print("Dashboard output written to trading_dashboard.png")
+
+    def _calculate_rsi(self, series, window):
+        delta = series.diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window).mean()
+        return 100 - (100 / (1 + (gain / (loss + 1e-8))))
 
 if __name__ == "__main__":
-    # Ingesting EUR/USD 15-Minute Structural candles
-    quant_engine = InstitutionalForexEngine(symbol="EURUSD=X", interval="15m", period="60d")
-    quant_engine.run_walk_forward_execution()
+    engine = VisualQuantEngine("EURUSD=X")
+    engine.run_pipeline()
